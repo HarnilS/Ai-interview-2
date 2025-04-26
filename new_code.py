@@ -9,7 +9,7 @@ from langchain_groq import ChatGroq
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationChain
 from langchain.prompts.prompt import PromptTemplate
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddingsmu import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
@@ -17,12 +17,11 @@ import nltk
 nltk.download('punkt_tab')
 from typing import Literal
 import numpy as np
+import mediapipe as mp
 
-# Interview duration set to 30 minutes (1800 seconds)
 INTERVIEW_DURATION = 1800
 
 def speak(text):
-    """Convert text to speech in a separate thread."""
     def tts():
         engine = pyttsx3.init()
         engine.say(text)
@@ -31,87 +30,94 @@ def speak(text):
     thread.start()
 
 class VideoTransformer(VideoTransformerBase):
-    """Video transformer for cheating detection using OpenCV DNN without dlib."""
-    def init(self):
-        # Load OpenCV DNN face detection model
-        self.net = cv2.dnn.readNetFromCaffe("models/deploy.prototxt", "models/res10_300x300_ssd_iter_140000.caffemodel")
+    def _init_(self):
+        self.mp_face_mesh = mp.solutions.face_mesh
+        self.face_mesh = self.mp_face_mesh.FaceMesh(
+            static_image_mode=False,
+            max_num_faces=2,
+            min_detection_confidence=0.5
+        )
         self.cheating_detected = False
+        self.pose_history = []
+
+    def estimate_head_pose(self, face_landmarks, image_shape):
+        model_points = np.array([
+            [0.0, 0.0, 0.0], [0.0, -330.0, -65.0], [-225.0, 170.0, -135.0],
+            [225.0, 170.0, -135.0], [-150.0, -150.0, -125.0], [150.0, -150.0, -125.0]
+        ], dtype="double")
+        landmark_indices = [1, 152, 33, 263, 61, 291]
+        image_points = np.array([[face_landmarks.landmark[idx].x * image_shape[1],
+                                  face_landmarks.landmark[idx].y * image_shape[0]]
+                                 for idx in landmark_indices], dtype="double")
+        focal_length = image_shape[1]
+        center = (image_shape[1] / 2, image_shape[0] / 2)
+        camera_matrix = np.array([[focal_length, 0, center[0]], [0, focal_length, center[1]], [0, 0, 1]], dtype="double")
+        dist_coeffs = np.zeros((4, 1))
+        success, rvec, tvec = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs)
+        if success:
+            rotation_matrix, _ = cv2.Rodrigues(rvec)
+            sy = np.sqrt(rotation_matrix[0, 0] ** 2 + rotation_matrix[1, 0] ** 2)
+            if sy >= 1e-6:
+                roll = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
+                pitch = np.arctan2(-rotation_matrix[2, 0], sy)
+                yaw = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
+                print(f"Head Pose - Yaw: {np.degrees(yaw):.2f}, Pitch: {np.degrees(pitch):.2f}, Roll: {np.degrees(roll):.2f}")
+                return np.degrees(yaw), np.degrees(pitch), np.degrees(roll)
+        print("Head pose estimation failed")
+        return 0, 0, 0
 
     def transform(self, frame):
-        """Process each video frame to detect cheating."""
         img = frame.to_ndarray(format="bgr24")
-        height, width = img.shape[:2]
-
-        # Prepare image for DNN face detection
-        blob = cv2.dnn.blobFromImage(cv2.resize(img, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
-        self.net.setInput(blob)
-        detections = self.net.forward()
-
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = self.face_mesh.process(img_rgb)
         num_faces = 0
         looking_away = False
+        excessive_movement = False
 
-        # Process each detected face
-        for i in range(detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
-            if confidence > 0.5:
-                num_faces += 1
-                box = detections[0, 0, i, 3:7] * np.array([width, height, width, height])
-                (startX, startY, endX, endY) = box.astype("int")
-                cv2.rectangle(img, (startX, startY), (endX, endY), (0, 255, 0), 2)
-
-                # Simple side face detection based on bounding box asymmetry
-                face_width = endX - startX
-                face_height = endY - startY
-                center_x = (startX + endX) // 2
-                left_half = center_x - startX
-                right_half = endX - center_x
-                asymmetry_ratio = abs(left_half - right_half) / max(left_half, right_half)
-
-                # If the face is significantly asymmetrical, assume looking away
-                if asymmetry_ratio > 0.3:  # Threshold can be adjusted
+        if results.multi_face_landmarks:
+            num_faces = len(results.multi_face_landmarks)
+            print(f"Number of faces detected: {num_faces}")
+            for face_landmarks in results.multi_face_landmarks:
+                yaw, pitch, roll = self.estimate_head_pose(face_landmarks, img.shape)
+                if abs(yaw) > 15 or abs(pitch) > 10 or abs(roll) > 15:
                     looking_away = True
-                    cv2.putText(img, "Looking away!", (startX, startY - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    print("Looking away detected")
+                self.pose_history.append((yaw, pitch, roll))
+                if len(self.pose_history) > 5:
+                    self.pose_history.pop(0)
+                if len(self.pose_history) >= 5:
+                    variances = [np.var([p[i] for p in self.pose_history]) for i in range(3)]
+                    print(f"Pose variances: {variances}")
+                    if any(var > 25 for var in variances):
+                        excessive_movement = True
+                        print("Excessive movement detected")
+        else:
+            print("No faces detected")
 
-        # Display cheating indicators
+        self.cheating_detected = num_faces == 0 or num_faces > 1 or looking_away or excessive_movement
+        print(f"Cheating detected: {self.cheating_detected}")
+        st.session_state["cheating_detected"] = self.cheating_detected
+
         if num_faces == 0:
             cv2.putText(img, "No face detected!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        if num_faces > 1:
-            cv2.putText(img, "Multiple faces detected!", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        if looking_away:
-            cv2.putText(img, "Looking away detected!", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        # Determine cheating status
-        self.cheating_detected = num_faces == 0 or num_faces > 1 or looking_away
-        if not self.cheating_detected:
+        elif num_faces > 1:
+            cv2.putText(img, "Multiple faces detected!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        elif looking_away:
+            cv2.putText(img, "Looking away detected!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        elif excessive_movement:
+            cv2.putText(img, "Excessive movement detected!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        else:
             cv2.putText(img, "Monitoring...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        st.session_state["cheating_detected"] = self.cheating_detected
         return img
 
 def main_app():
-    """Main application logic for the AI Interview System."""
     st.title("AI Interview System")
-
     position = st.selectbox("Select the position:", ["Data Analyst", "Software Engineer", "Cyber Security", "Web Development"])
     resume = st.file_uploader("Upload your resume", type=["pdf", "txt"])
     auto_play = st.checkbox("Let AI interviewer speak!")
     voice_input = st.checkbox("Use voice input for answers")
-    
-    st.sidebar.title("📊 Interview Progress")
-    if "question_count" not in st.session_state:
-        st.session_state.question_count = 0
-    st.sidebar.progress(st.session_state.question_count / 12)
-    st.sidebar.write(f"*Question:* {st.session_state.question_count + 1}/12")
 
-    with st.expander("📌 Instructions"):
-        st.markdown("""
-        - You have 30 minutes.
-        - The webcam will monitor for cheating.
-        - Answer in voice or text.
-        - AI will ask resume, DSA and coding questions.
-        """)
-
-    # Initialize session state variables
     if "cheating_detected" not in st.session_state:
         st.session_state["cheating_detected"] = False
     if "cheating_warnings" not in st.session_state:
@@ -123,7 +129,6 @@ def main_app():
     if "waiting_for_ready" not in st.session_state:
         st.session_state["waiting_for_ready"] = False
 
-    # Display remaining time
     if "start_time" in st.session_state:
         elapsed_time = time.time() - st.session_state.start_time
         if elapsed_time > INTERVIEW_DURATION:
@@ -134,14 +139,13 @@ def main_app():
         minutes, seconds = divmod(int(remaining_time), 60)
         st.sidebar.write(f"Time Remaining: {minutes:02d}:{seconds:02d}")
 
-    # Webcam monitoring
     webrtc_streamer(
         key="example",
         video_transformer_factory=VideoTransformer,
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
     )
 
-    # Handle cheating warnings
+    st.write(f"Cheating detected status: {st.session_state['cheating_detected']}")  # Debug line
     if st.session_state["cheating_detected"]:
         st.session_state.cheating_warnings += 1
         if st.session_state.cheating_warnings >= 3:
@@ -155,7 +159,6 @@ def main_app():
         message: str
 
     def process_resume(resume):
-        """Process the uploaded resume into a searchable vector store."""
         text = ""
         if resume.type == "application/pdf":
             pdf_reader = PdfReader(resume)
@@ -171,7 +174,6 @@ def main_app():
         return FAISS.from_texts(texts, embeddings)
 
     def initialize_session():
-        """Initialize the interview session state."""
         if 'docsearch' not in st.session_state:
             st.session_state.docsearch = process_resume(resume)
         if 'retriever' not in st.session_state:
@@ -183,7 +185,7 @@ def main_app():
         if "resume_memory" not in st.session_state:
             st.session_state.resume_memory = ConversationBufferMemory(memory_key="history", return_messages=True)
         if "resume_screen" not in st.session_state:
-            groq_api_key = os.getenv("GROQ_API_KEY", "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")
+            groq_api_key = os.getenv("GROQ_API_KEY", "your_default_api_key_here")
             llm = ChatGroq(
                 groq_api_key=groq_api_key,
                 model_name="llama-3.3-70b-versatile",
@@ -227,33 +229,8 @@ Candidate: {input}
             )
             st.session_state.start_time = time.time()
             st.session_state.question_count = 0
-            st.session_state.resume_chain = ConversationChain(
-                llm=llm, memory=st.session_state.resume_memory, prompt=PROMPT, verbose=False
-            )
-
-        for msg in st.session_state.resume_history:
-            with st.chat_message(msg.origin):
-                st.markdown(msg.message)
-
-        if st.session_state.question_count < 12:
-            st.session_state.waiting_for_ready = st.button("Ready for next question")
-            if st.session_state.waiting_for_ready:
-                last_input = st.session_state.resume_history[-1].message
-                ai_response = st.session_state.resume_chain.run(input=last_input)
-                st.session_state.resume_history.append(Message("ai", ai_response))
-                st.session_state.question_count += 1
-                if auto_play:
-                    speak(ai_response)
-                st.rerun()
-        else:
-            st.success("✅ Interview Complete.")
-            full_chat = "\n".join([f"{m.origin.capitalize()}: {m.message}" for m in st.session_state.resume_history])
-            summary = st.session_state.resume_chain.run(input=f"Summarize this interview:\n{full_chat}")
-            st.subheader("📝 Interview Summary")
-            st.write(summary)
 
     def transcribe_audio():
-        """Transcribe audio input from the user."""
         recognizer = sr.Recognizer()
         with sr.Microphone() as source:
             st.info("🎤 Listening... Speak now!")
@@ -269,7 +246,6 @@ Candidate: {input}
             return ""
 
     def query_with_retry(chain, user_input, retries=3, delay=5):
-        """Handle API queries with retry logic for rate limits."""
         for _ in range(retries):
             try:
                 return chain.run(input=user_input)
@@ -282,7 +258,6 @@ Candidate: {input}
         return "Request failed due to repeated rate limit errors."
 
     def answer_callback():
-        """Process the user's answer and generate the next AI question."""
         if st.session_state.question_count >= 12:
             st.write("Thank you for completing the interview!")
             return
@@ -300,7 +275,6 @@ Candidate: {input}
     if position and resume:
         initialize_session()
 
-        # Check if interview should stop
         if st.session_state.interview_stopped:
             if st.session_state.time_up:
                 st.error("You did not respond in time. Interview stopped.")
@@ -308,14 +282,12 @@ Candidate: {input}
                 st.error("Cheating detected three times. Interview stopped.")
             return
 
-        # Display chat history
         chat_container = st.container()
         with chat_container:
             for msg in st.session_state.resume_history:
                 with st.chat_message(msg.origin):
                     st.write(msg.message)
 
-        # Handle response time enforcement
         if st.session_state.waiting_for_ready:
             with st.container():
                 st.write("You have 10 seconds to start responding.")
