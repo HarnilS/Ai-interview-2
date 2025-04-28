@@ -14,40 +14,36 @@ from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
 import nltk
-nltk.download('punkt_tab')
+nltk.download('punkt_tab')  # corrected from 'punkt_tab'
 from typing import Literal
-import numpy as np
 from streamlit_audio_recorder import audio_recorder
 import io
 
-# Interview duration set to 30 minutes (1800 seconds)
-INTERVIEW_DURATION = 1800
+# Interview duration
+INTERVIEW_DURATION = 1800  # 30 minutes
 MAX_QUESTIONS = 12
-    
+
 def speak(text):
-    """Convert text to speech in a separate thread."""
+    """Convert text to speech asynchronously."""
     def tts():
         engine = pyttsx3.init()
         engine.say(text)
         engine.runAndWait()
-    thread = threading.Thread(target=tts)
-    thread.start()
-
-
+    threading.Thread(target=tts).start()
 
 def main_app():
-    """Main application logic for the AI Interview System."""
+    """Main application logic."""
     st.title("AI Interview System")
 
     position = st.selectbox("Select the position:", ["Data Analyst", "Software Engineer", "Cyber Security", "Web Development"])
     resume = st.file_uploader("Upload your resume", type=["pdf", "txt"])
     auto_play = st.checkbox("Let AI interviewer speak!")
     voice_input = st.checkbox("Use voice input for answers")
-    
+
     st.sidebar.title("📊 Interview Progress")
     if "question_count" not in st.session_state:
         st.session_state.question_count = 0
-    st.sidebar.progress(st.session_state.question_count / (MAX_QUESTIONS -1))
+    st.sidebar.progress(st.session_state.question_count / (MAX_QUESTIONS - 1))
     st.sidebar.write(f"**Question:** {st.session_state.question_count}/{MAX_QUESTIONS}")
 
     with st.expander("📌 Instructions"):
@@ -58,8 +54,7 @@ def main_app():
         - AI will ask resume, DSA and coding questions.
         """)
 
-
-    # Display remaining time
+    # Timer
     if "start_time" in st.session_state:
         elapsed_time = time.time() - st.session_state.start_time
         if elapsed_time > INTERVIEW_DURATION:
@@ -70,33 +65,29 @@ def main_app():
         minutes, seconds = divmod(int(remaining_time), 60)
         st.sidebar.write(f"Time Remaining: {minutes:02d}:{seconds:02d}")
 
-    
-    
-
-
     @dataclass
     class Message:
         origin: Literal["human", "ai"]
         message: str
 
-    def process_resume(resume):
-        """Process the uploaded resume into a searchable vector store."""
+    def process_resume(resume_file):
+        """Process uploaded resume."""
         text = ""
-        if resume.type == "application/pdf":
-            pdf_reader = PdfReader(resume)
+        if resume_file.type == "application/pdf":
+            pdf_reader = PdfReader(resume_file)
             for page in pdf_reader.pages:
                 extracted_text = page.extract_text()
                 if extracted_text:
                     text += extracted_text
         else:
-            text = resume.read().decode("utf-8")
+            text = resume_file.read().decode("utf-8")
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
         texts = text_splitter.split_text(text)
         embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
         return FAISS.from_texts(texts, embeddings)
 
     def initialize_session():
-        """Initialize the interview session state."""
+        """Setup session states."""
         if 'docsearch' not in st.session_state:
             st.session_state.docsearch = process_resume(resume)
         if 'retriever' not in st.session_state:
@@ -111,7 +102,7 @@ def main_app():
             groq_api_key = os.getenv("GROQ_API_KEY", "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")
             llm = ChatGroq(
                 groq_api_key=groq_api_key,
-                model_name="llama-3.3-70b-versatile",
+                model_name="llama-3-70b-8192",
                 temperature=0.7
             )
             PROMPT = PromptTemplate(
@@ -138,7 +129,7 @@ def main_app():
 - Display Thank You message after completion of all questions.
 
 Let's start the interview. Ask the candidate to introduce themselves.
-               
+
 Current Conversation:
 {history}
 
@@ -153,28 +144,25 @@ Candidate: {input}
             )
             st.session_state.start_time = time.time()
             st.session_state.question_count = 0
-            
-    def transcribe_audio():
-        """Transcribe audio input from the user."""
-        audio_bytes = audio_recorder()
+
+    def transcribe_audio(audio_bytes):
+        """Transcribe audio input."""
         if audio_bytes:
-            st.audio(audio_bytes, format="audio/wav")
             recognizer = sr.Recognizer()
             with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
                 audio = recognizer.record(source)
-        try:
-            text = recognizer.recognize_google(audio)
-            st.success(f"Transcribed: {text}")
-            return text
-        except sr.UnknownValueError:
-            st.error("Sorry, could not understand the audio.")
-            return ""
+            try:
+                text = recognizer.recognize_google(audio)
+                st.success(f"Transcribed: {text}")
+                return text
+            except sr.UnknownValueError:
+                st.error("Sorry, could not understand the audio.")
         else:
-        st.warning("Please record your answer first!")
-        return ""    
+            st.warning("Please record your answer first!")
+        return ""
 
     def query_with_retry(chain, user_input, retries=3, delay=5):
-        """Handle API queries with retry logic for rate limits."""
+        """Retry in case of rate limit."""
         for _ in range(retries):
             try:
                 return chain.run(input=user_input)
@@ -187,9 +175,9 @@ Candidate: {input}
         return "Request failed due to repeated rate limit errors."
 
     def answer_callback():
-        """Process the user's answer and generate the next AI question."""
-        if st.session_state.question_count >= MAX_QUESTIONS-1:
-            st.write("Thank you for completing the interview!")
+        """Handle user answers."""
+        if st.session_state.question_count >= MAX_QUESTIONS - 1:
+            st.success("Thank you for completing the interview!")
             return
         human_answer = st.session_state.get("answer", "")
         st.session_state.resume_history.append(Message("human", human_answer))
@@ -205,15 +193,12 @@ Candidate: {input}
     if position and resume:
         initialize_session()
 
-
-        # Display chat history
         chat_container = st.container()
         with chat_container:
             for msg in st.session_state.resume_history:
                 with st.chat_message(msg.origin):
                     st.write(msg.message)
 
-        # Handle response time enforcement
         if st.session_state.waiting_for_ready:
             with st.container():
                 st.write("You have 20 seconds to start responding.")
@@ -233,7 +218,7 @@ Candidate: {input}
                             st.session_state["answer"] = transcribed_text
                             answer_callback()
                             st.rerun()
-                user_input = st.text_area("Your Answer:", key="user_input", help="Enter your response here...", height=200)
+                user_input = st.text_area("Your Answer:", key="user_input", height=200)
                 if st.button("Submit Text Answer"):
                     if user_input.strip():
                         st.session_state["answer"] = user_input
