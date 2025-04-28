@@ -16,6 +16,8 @@ from PyPDF2 import PdfReader
 import nltk
 nltk.download('punkt_tab')
 from typing import Literal
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+import cv2
 import numpy as np
 
 # Interview duration set to 30 minutes (1800 seconds)
@@ -236,5 +238,5 @@ Candidate: {input}
                     else:
                         st.warning("Please enter your answer before submitting.")
 
-if __name__ == "__main__":w 
+if __name__ == "__main__":
     main_app()
