@@ -1,12 +1,13 @@
-streamlit
+You said:
+﻿streamlit
+dataclasses
 pyttsx3
-SpeechRecognition
+speechrecognition
 langchain
-langchain_groq
-langchain_community
+langchain-community
+langchain-groq
+groq
 nltk
-streamlit-audio-recorder
 PyPDF2
-sentence-transformers
 faiss-cpu
-pydub
+sentence-transformers
