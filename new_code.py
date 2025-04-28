@@ -17,6 +17,8 @@ import nltk
 nltk.download('punkt_tab')
 from typing import Literal
 import numpy as np
+from streamlit_audio_recorder import audio_recorder
+import io
 
 # Interview duration set to 30 minutes (1800 seconds)
 INTERVIEW_DURATION = 1800
@@ -154,19 +156,22 @@ Candidate: {input}
             
     def transcribe_audio():
         """Transcribe audio input from the user."""
-        recognizer = sr.Recognizer()
-        with sr.Microphone() as source:
-            st.info("🎤 Listening... Speak now!")
-            recognizer.adjust_for_ambient_noise(source)
-            audio = recognizer.listen(source, phrase_time_limit=10)
-            st.info("🔍 Processing your speech...")
+        audio_bytes = audio_recorder()
+        if audio_bytes:
+            st.audio(audio_bytes, format="audio/wav")
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
+                audio = recognizer.record(source)
         try:
             text = recognizer.recognize_google(audio)
             st.success(f"Transcribed: {text}")
             return text
         except sr.UnknownValueError:
-            st.error("Sorry, I couldn't understand.")
+            st.error("Sorry, could not understand the audio.")
             return ""
+        else:
+        st.warning("Please record your answer first!")
+        return ""    
 
     def query_with_retry(chain, user_input, retries=3, delay=5):
         """Handle API queries with retry logic for rate limits."""
@@ -221,8 +226,9 @@ Candidate: {input}
         else:
             with st.container():
                 if voice_input:
-                    if st.button("🎤 Answer with Voice"):
-                        transcribed_text = transcribe_audio()
+                    audio_bytes = audio_recorder()
+                    if audio_bytes:
+                        transcribed_text = transcribe_audio(audio_bytes)
                         if transcribed_text:
                             st.session_state["answer"] = transcribed_text
                             answer_callback()
