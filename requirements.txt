@@ -1,5 +1,4 @@
 streamlit
-dataclasses
 pyttsx3
 SpeechRecognition
 langchain
